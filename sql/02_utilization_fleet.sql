@@ -91,9 +91,6 @@ jd_unit_active AS (
         e._name,
         e.fleet_type
 ),
--- =====================
--- LIUGONG: Latest Equipment
--- =====================
 latest_liugong AS (
     SELECT
         serialNumber,
@@ -109,9 +106,6 @@ latest_liugong AS (
     ) t
     WHERE rn = 1
 ),
--- =====================
--- LIUGONG: Daily Work Hours
--- =====================
 liugong_daily AS (
     SELECT
         overall_unit_sn             AS serialNumber,
@@ -137,7 +131,6 @@ liugong_unit_active AS (
         l.productName,
         l.equipmentModel
 ),
-
 latest_caterpillar AS (
     SELECT
         asset_serial_number,
@@ -152,9 +145,6 @@ latest_caterpillar AS (
     ) t
     WHERE rn = 1
 ),
--- =====================
--- CATERPILLAR: Daily Work Hours
--- =====================
 caterpillar_daily AS (
     SELECT
         asset_serial_number         AS serialNumber,
@@ -186,50 +176,89 @@ all_units AS (
     UNION ALL
     SELECT * FROM liugong_unit_active
     UNION ALL
-    SELECT * FROM caterpillar_unit_active 
+    SELECT * FROM caterpillar_unit_active
 ),
 lark_fleet AS (
     SELECT
-        CASE 
+        CASE
             WHEN manufacture = 'CAT' THEN CONCAT('CAT', SUBSTR(equipment_serial_number, STRPOS(equipment_serial_number, 'SYW')))
-            ELSE equipment_serial_number 
-        END AS idNumber,
+            ELSE equipment_serial_number
+        END                                                         AS idNumber,
         CASE WHEN manufacture = 'CAT' THEN 'CATERPILLAR' ELSE manufacture END AS manufacture,
         equipment_location,
         egi_equipment_description,
         model,
         class,
-        user as user_company
+        user                                                        AS user_company
     FROM prod_datalake.view_larksheet_list_of_fleet
     WHERE extract_date = (
-        SELECT MAX(extract_date) 
+        SELECT MAX(extract_date)
         FROM prod_datalake.view_larksheet_list_of_fleet
     )
       AND UPPER(TRIM(manufacture)) IN ('MITSUBISHI', 'JOHN DEERE', 'LIUGONG', 'CAT')
+),
+
+-- =====================
+-- JOIN ALL UNITS + LARK
+-- =====================
+joined AS (
+    SELECT
+        UPPER(TRIM(a.manufacture))          AS manufacture,
+        UPPER(TRIM(a.vehicleType))          AS vehicleType,
+        lf.equipment_location,
+        lf.egi_equipment_description,       -- murni dari lark, fallback lewat master
+        lf.model,
+        lf.class,
+        lf.user_company,
+        a.total_active_days
+    FROM all_units a
+    LEFT JOIN lark_fleet lf
+        ON  UPPER(TRIM(a.idNumber))    = lf.idNumber
+        AND UPPER(TRIM(a.manufacture)) = lf.manufacture
+),
+
+-- =====================
+-- MASTER: model, class, egi_equipment_description per vehicleType + manufacture
+-- =====================
+vehicle_master AS (
+    SELECT
+        manufacture,
+        vehicleType,
+        MAX(model)                      AS model,
+        MAX(class)                      AS class,
+        MAX(egi_equipment_description)  AS egi_equipment_description
+    FROM joined
+    WHERE model IS NOT NULL
+      AND class IS NOT NULL
+    GROUP BY manufacture, vehicleType
 )
+
+-- =====================
+-- FINAL OUTPUT
+-- =====================
 SELECT
-    UPPER(TRIM(a.manufacture))                                                          AS manufacture,
-    UPPER(TRIM(a.vehicleType))                                                          AS vehicleType,
-    lf.equipment_location,
-    COALESCE(lf.egi_equipment_description, UPPER(TRIM(a.vehicleType)))                 AS equipment_description,
-    lf.model,
-    lf.class,
-    lf.user_company,
-    COUNT(*)                                                                            AS total_unit,
-    SUM(CASE WHEN a.total_active_days < 10 THEN 1 ELSE 0 END)                          AS total_underutilized_unit,
-    COUNT(*) - SUM(CASE WHEN a.total_active_days < 10 THEN 1 ELSE 0 END)               AS total_utilized_unit
-FROM all_units a
-LEFT JOIN lark_fleet lf
-    ON  UPPER(TRIM(a.idNumber))     = lf.idNumber
-    AND UPPER(TRIM(a.manufacture))  = lf.manufacture
+    j.manufacture,
+    j.vehicleType,
+    j.equipment_location,
+    COALESCE(j.egi_equipment_description, vm.egi_equipment_description) AS equipment_description,
+    COALESCE(j.model, vm.model)                                         AS model,
+    COALESCE(j.class, vm.class)                                         AS class,
+    j.user_company,
+    COUNT(*)                                                            AS total_unit,
+    SUM(CASE WHEN j.total_active_days < 10 THEN 1 ELSE 0 END)          AS total_underutilized_unit,
+    COUNT(*) - SUM(CASE WHEN j.total_active_days < 10 THEN 1 ELSE 0 END) AS total_utilized_unit
+FROM joined j
+LEFT JOIN vehicle_master vm
+    ON  j.manufacture = vm.manufacture
+    AND j.vehicleType = vm.vehicleType
 GROUP BY
-    UPPER(TRIM(a.manufacture)),
-    UPPER(TRIM(a.vehicleType)),
-    lf.equipment_location,
-    COALESCE(lf.egi_equipment_description, UPPER(TRIM(a.vehicleType))),
-    lf.model,
-    lf.class,
-    lf.user_company
+    j.manufacture,
+    j.vehicleType,
+    j.equipment_location,
+    COALESCE(j.egi_equipment_description, vm.egi_equipment_description),
+    COALESCE(j.model, vm.model),
+    COALESCE(j.class, vm.class),
+    j.user_company
 ORDER BY
-    manufacture,
+    j.manufacture,
     total_underutilized_unit DESC
